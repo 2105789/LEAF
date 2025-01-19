@@ -1,0 +1,10 @@
+Convert the following SQL query result into a valid Python dictionary.
+The dictionary should have meaningful keys and numeric values (convert string numbers to floats or integers).
+Only include key-value pairs that represent actual data points.
+
+SQL Result:
+{sql_result}
+
+Return only the Python dictionary code, nothing else.
+Example format:
+{{"key1": 123, "key2": 456.7}}

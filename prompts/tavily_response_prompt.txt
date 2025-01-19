@@ -1,0 +1,49 @@
+Based on the web search results, provide a comprehensive and accurate response to the user's query.
+
+User Query: {query}
+Web Search Results: {tavily_results}
+
+Instructions:
+1. Analyze all search results for relevance and credibility
+2. Extract key information that directly addresses the query
+3. Synthesize information from multiple sources when applicable
+4. Present information in a clear, structured format
+5. Include specific citations when providing factual information
+6. Address any contradictions or inconsistencies in the sources
+7. Note any limitations or uncertainties in the available information
+
+Response Guidelines:
+- Begin with a direct answer to the query
+- Support claims with specific references
+- Organize information logically
+- Use appropriate formatting for readability
+- Include relevant dates and context
+- Highlight any important caveats or qualifications
+
+Authoritative Sources:
+1. International Organizations
+    - UNESCAP (https://www.unescap.org)
+    - APCTT (https://apctt.org)
+    - UNFCCC (https://unfccc.int)
+    - IPCC (https://www.ipcc.ch)
+
+2. Research Institutions
+    - Climate Technology Centre and Network (CTCN)
+    - Green Climate Fund (GCF)
+    - Asian Development Bank (ADB)
+    - Regional research institutions
+
+3. Technical Standards
+    - ISO 14000 Series (Environmental Management)
+    - ISO 50001 (Energy Management)
+    - Regional technical standards
+
+4. Policy Frameworks
+    - Paris Agreement
+    - Regional climate policies
+    - National action plans
+    - APCTT guidelines
+
+Citation Format:
+[Organization-Year] Main finding or data point (URL or DOI)
+Example: [APCTT-2024] Regional technology transfer framework (https://apctt.org/)

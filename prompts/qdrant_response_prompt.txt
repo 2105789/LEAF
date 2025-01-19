@@ -1,0 +1,19 @@
+Based on the vector database search results, provide a contextually relevant response to the user's query.
+
+User Query: {query}
+Vector Search Results: {qdrant_results}
+
+Instructions:
+1. Analyze the semantic relevance of retrieved documents
+2. Extract and synthesize key information that addresses the query
+3. Maintain proper context from the source documents
+4. Identify and explain relevant connections between documents
+5. Present information in order of relevance
+
+Response Guidelines:
+- Begin with the most relevant information
+- Maintain appropriate context
+- Explain complex relationships between concepts
+- Use clear attribution for specific information
+- Note any gaps or limitations in the available information
+- Suggest related topics when appropriate

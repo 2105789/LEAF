@@ -43,6 +43,7 @@ Important Rules:
     Web Search must always be paired with at least one other source (AI Knowledge, or Vector Database).
     If the query is NOT related to the environment, climate change, or elements linked to it, select "None".
 
-Select one or more options (comma-separated): Web Search, Vector Database, AI Knowledge, None
-
 You dont need to justify or give reasoning and overview for your choice, just reply with the sources you think are most relevant.
+You just need to select the Knowledge Sources and give me a comma separated string as response you dont have to justify or repond to any query at all.
+Also no need to producde affernative response i just ant knowledge source as instructed as respone.
+Select one or more options (comma-separated): Web Search, Vector Database, AI Knowledge, None

@@ -1,6 +1,6 @@
 streamlit
 langchain-google-genai
-langchain-community
+langchain-community>=0.0.24
 langchain
 tavily-python
 SQLAlchemy
@@ -24,3 +24,5 @@ pandas
 plotly
 tenacity
 langchain-groq
+langchain-core>=0.1.27
+sqlitedict>=2.1.0

@@ -181,7 +181,7 @@ class MultiRAGChatbot:
         }
         for key, filepath in prompt_files.items():
             try:
-                with open(filepath, "r") as f:
+                with open(filepath, "r",encoding="utf-8") as f:
                     self.prompts[key] = f.read()
             except FileNotFoundError:
                 if key == "combined":
@@ -287,33 +287,48 @@ class MultiRAGChatbot:
         ai_chain = ai_prompt | self.groq_llm | self.output_parser
         return ai_chain.invoke({"query": query})
 
-    def combine_results(self, query: str, results: Dict) -> str:
+    def combine_results(self, query: str, results: Dict, conversation_history: List[Dict[str, str]] = None) -> str:
         if not results:
             return "No results found from any knowledge source."
+        
+        # Format conversation history
+        formatted_history = ""
+        if conversation_history:
+            for msg in conversation_history[-5:]:  # Only use last 5 messages for context
+                formatted_history += f"{msg['role'].title()}: {msg['content']}\n"
+        
         context = self.prompts["system"] + "\n\n" + self.prompts["combined"]
         combine_prompt = PromptTemplate(
-            template=context,
-            input_variables=["query", "tavily_results", "qdrant_results", "ai_knowledge_results"]
+            template=context + "\n\nConversation History:\n{history}\n\nCurrent Query: {query}",
+            input_variables=["query", "tavily_results", "qdrant_results", "ai_knowledge_results", "history"]
         )
         template_vars = {
             "query": query,
             "tavily_results": results.get("tavily", "No results from Tavily."),
             "qdrant_results": results.get("qdrant", "No results from Qdrant."),
-            "ai_knowledge_results": results.get("ai_knowledge", "No results from AI Knowledge.")
+            "ai_knowledge_results": results.get("ai_knowledge", "No results from AI Knowledge."),
+            "history": formatted_history
         }
         refine_chain = combine_prompt | self.gemini_llm | self.output_parser
         return refine_chain.invoke(template_vars)
 
-    def handle_conversation(self, query: str) -> str:
+    def handle_conversation(self, query: str, conversation_history: List[Dict[str, str]] = None) -> str:
         if not self.prompts["conversation"]:
             return "I'm here to chat! How can I assist you today?"
+        
+        # Format conversation history
+        formatted_history = ""
+        if conversation_history:
+            for msg in conversation_history[-5:]:  # Only use last 5 messages for context
+                formatted_history += f"{msg['role'].title()}: {msg['content']}\n"
+        
         context = self.prompts["system"] + "\n\n" + self.prompts["conversation"]
         conversation_prompt = PromptTemplate(
-            template=context,
-            input_variables=["query"]
+            template=context + "\n\nConversation History:\n{history}\n\nCurrent Query: {query}",
+            input_variables=["query", "history"]
         )
         conversation_chain = conversation_prompt | self.groq_llm | self.output_parser
-        return conversation_chain.invoke({"query": query})
+        return conversation_chain.invoke({"query": query, "history": formatted_history})
 
     def format_sources(self, results: Dict) -> str:
         sources = []
@@ -375,11 +390,11 @@ async def main():
             else:
                 flows = chatbot.get_flows(prompt)
                 if "None" in flows:
-                    response = chatbot.handle_conversation(prompt)
+                    response = chatbot.handle_conversation(prompt, st.session_state.messages)
                 else:
                     try:
                         results = await chatbot.execute_flows(prompt, flows)
-                        response = chatbot.combine_results(prompt, results)
+                        response = chatbot.combine_results(prompt, results, st.session_state.messages)
                         sources = chatbot.format_sources(results)
                         response = f"{response}\n\n{sources}"
                     except Exception:

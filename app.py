@@ -19,6 +19,15 @@ import tenacity
 from tenacity import retry, stop_after_attempt, wait_exponential
 import pandas as pd
 import sqlite3
+import concurrent.futures
+from functools import partial
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from cachetools import TTLCache, LRUCache
+from queue import Queue
+from threading import Lock
+import aiohttp
+from functools import lru_cache
+import time
 
 nest_asyncio.apply()
 
@@ -33,6 +42,32 @@ api_keys = {
     "QDRANT_URL": st.secrets["QDRANT_URL"],
     "QDRANT_API_KEY": st.secrets["QDRANT_API_KEY"]
 }
+
+# Add connection pool for SQLite
+class DatabaseConnectionPool:
+    def __init__(self, max_connections=5):
+        self.max_connections = max_connections
+        self.connections = Queue(maxsize=max_connections)
+        self.lock = Lock()
+        
+        # Initialize the pool
+        for _ in range(max_connections):
+            conn = sqlite3.connect("chat_history.db", check_same_thread=False)
+            self.connections.put(conn)
+    
+    def get_connection(self):
+        return self.connections.get()
+    
+    def return_connection(self, conn):
+        self.connections.put(conn)
+    
+    def close_all(self):
+        while not self.connections.empty():
+            conn = self.connections.get()
+            conn.close()
+
+# Initialize the connection pool
+db_pool = DatabaseConnectionPool()
 
 def initialize_chat_history_db():
     conn = sqlite3.connect("chat_history.db")
@@ -57,26 +92,30 @@ def initialize_chat_history_db():
     conn.close()
 
 def save_user_message(content: str) -> int:
-    conn = sqlite3.connect("chat_history.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO user_messages (content)
-        VALUES (?)
-    """, (content.lower(),))
-    user_message_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return user_message_id
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_messages (content)
+            VALUES (?)
+        """, (content.lower(),))
+        user_message_id = cursor.lastrowid
+        conn.commit()
+        return user_message_id
+    finally:
+        db_pool.return_connection(conn)
 
 def save_assistant_response(content: str, user_message_id: int):
-    conn = sqlite3.connect("chat_history.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO assistant_responses (content, user_message_id)
-        VALUES (?, ?)
-    """, (content, user_message_id))
-    conn.commit()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO assistant_responses (content, user_message_id)
+            VALUES (?, ?)
+        """, (content, user_message_id))
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
 
 def get_recent_response(user_message: str) -> Optional[str]:
     conn = sqlite3.connect("chat_history.db")
@@ -117,6 +156,13 @@ class MultiRAGChatbot:
         self.setup_databases()
         self.load_prompts()
         self.initialize_response_cache()
+        
+        # Add caches
+        self.embedding_cache = TTLCache(maxsize=1000, ttl=3600)  # 1 hour TTL
+        self.search_cache = TTLCache(maxsize=100, ttl=300)  # 5 minutes TTL
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.session = None
+        self.request_semaphore = asyncio.Semaphore(5)  # Limit concurrent API requests
 
     def setup_apis(self):
         for key, value in self.api_keys.items():
@@ -234,45 +280,97 @@ class MultiRAGChatbot:
         print(f"Selected flows for query '{query}': {selected_flows}")
         return selected_flows
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def _async_tavily_search(self, query: str):
-        search_params = {
-            "query": query,
-            "include_answer": True,
-            "include_raw_content": True,
-            "search_depth": "advanced",
-            "include_domains": ["apctt.org", "arxiv.org", "springer.com", "nature.com", "sciencemag.org", "ipcc.ch", "unfccc.int", "globalchange.gov", "climate.gov", "carbonbrief.org", "wmo.int", "earthobservatory.nasa.gov", "copernicus.eu", "iea.org", "irena.org", "pnas.org", "journals.ametsoc.org", "sciencedirect.com", "tandfonline.com", "agu.org"],       
-            "max_results": 15
-        }
-        return await asyncio.to_thread(self.tavily_client.search, **search_params)
+    async def setup_aiohttp_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+            
+    async def cleanup(self):
+        if self.session:
+            await self.session.close()
+            
+    @lru_cache(maxsize=100)
+    def get_embedding(self, text: str):
+        """Cache embeddings for frequently used texts"""
+        if text in self.embedding_cache:
+            return self.embedding_cache[text]
+        embedding = self.embeddings.embed_query(text)
+        self.embedding_cache[text] = embedding
+        return embedding
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def _async_tavily_search(self, query: str):
+        cache_key = f"tavily_{query}"
+        if cache_key in self.search_cache:
+            return self.search_cache[cache_key]
+
+        async with self.request_semaphore:  # Limit concurrent requests
+            try:
+                search_params = {
+                    "query": query,
+                    "include_answer": True,
+                    "include_raw_content": True,
+                    "search_depth": "advanced",
+                    "include_domains": [
+                        "apctt.org", "arxiv.org", "springer.com", "nature.com",
+                        "sciencemag.org", "ipcc.ch", "unfccc.int", "globalchange.gov",
+                        "climate.gov", "carbonbrief.org", "wmo.int", 
+                        "earthobservatory.nasa.gov", "copernicus.eu", "iea.org",
+                        "irena.org", "pnas.org", "journals.ametsoc.org",
+                        "sciencedirect.com", "tandfonline.com", "agu.org"
+                    ],
+                    "max_results": 15
+                }
+                
+                result = await asyncio.get_event_loop().run_in_executor(
+                    self.executor,
+                    partial(self.tavily_client.search, **search_params)
+                )
+                
+                self.search_cache[cache_key] = result
+                return result
+                
+            except Exception as e:
+                logger.error(f"Tavily search error: {e}")
+                return None
+
     async def execute_flows(self, query: str, flows: List[str]) -> Dict:
         results = {}
         cache_key = f"{query}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        print(f"Executing flows for query '{query}': {flows}")
-        if "Web Search" in flows:
-            try:
-                print("Executing Web Search flow...")
-                tavily_results = await self._async_tavily_search(query)
-                results["tavily"] = tavily_results
-            except Exception:
-                results["tavily"] = None
-        if "Vector Database" in flows:
-            try:
-                print("Executing Vector Database flow...")
-                docs = self.vectorstore.similarity_search(query)
-                qdrant_results = "\n\n".join([doc.page_content for doc in docs]) if docs else ""
-                results["qdrant"] = qdrant_results
-            except Exception:
-                results["qdrant"] = None
-        if "AI Knowledge" in flows:
-            try:
-                print("Executing AI Knowledge flow...")
-                ai_results = self.generate_from_own_knowledge(query)
-                results["ai_knowledge"] = ai_results
-            except Exception:
-                results["ai_knowledge"] = None
+        
+        async def process_web_search():
+            if "Web Search" in flows:
+                results["tavily"] = await self._async_tavily_search(query)
+                
+        async def process_vector_search():
+            if "Vector Database" in flows:
+                try:
+                    embedding = self.get_embedding(query)
+                    docs = await asyncio.get_event_loop().run_in_executor(
+                        self.executor,
+                        lambda: self.vectorstore.similarity_search(query)
+                    )
+                    results["qdrant"] = "\n\n".join([doc.page_content for doc in docs]) if docs else ""
+                except Exception as e:
+                    logger.error(f"Vector search error: {e}")
+                    results["qdrant"] = None
+                    
+        async def process_ai_knowledge():
+            if "AI Knowledge" in flows:
+                try:
+                    results["ai_knowledge"] = await asyncio.get_event_loop().run_in_executor(
+                        self.executor,
+                        lambda: self.generate_from_own_knowledge(query)
+                    )
+                except Exception as e:
+                    logger.error(f"AI Knowledge error: {e}")
+                    results["ai_knowledge"] = None
+
+        # Execute all flows concurrently
+        await asyncio.gather(
+            process_web_search(),
+            process_vector_search(),
+            process_ai_knowledge()
+        )
+
         st.session_state.response_cache[cache_key] = results
         return results
 
@@ -360,48 +458,55 @@ async def main():
      
     """,unsafe_allow_html=True,)
 
-    st.title("🌿 LEAF Chatbot")
-    st.markdown("Welcome to the LEAF Chatbot! Ask me anything about climate change, sustainability, and more.")
-
     chatbot = MultiRAGChatbot()
+    
+    try:
+        await chatbot.setup_aiohttp_session()
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
 
-    query_params = st.query_params
-    user_id = str(hash(frozenset(query_params.items())))
-    st.session_state.user_id = user_id
+        query_params = st.query_params
+        user_id = str(hash(frozenset(query_params.items())))
+        st.session_state.user_id = user_id
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        st.title("🌿 LEAF Chatbot")
+        st.markdown("Welcome to the LEAF Chatbot! Ask me anything about climate change, sustainability, and more.")
 
-    if prompt := st.chat_input("What would you like to know?"):
-        user_message_lower = prompt.lower()
-        user_message_id = save_user_message(user_message_lower)
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            recent_response = get_recent_response(user_message_lower)
-            if recent_response:
-                response = recent_response
-            else:
-                flows = chatbot.get_flows(prompt)
-                if "None" in flows:
-                    response = chatbot.handle_conversation(prompt, st.session_state.messages)
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        if prompt := st.chat_input("What would you like to know?"):
+            user_message_lower = prompt.lower()
+            user_message_id = save_user_message(user_message_lower)
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                recent_response = get_recent_response(user_message_lower)
+                if recent_response:
+                    response = recent_response
                 else:
-                    try:
-                        results = await chatbot.execute_flows(prompt, flows)
-                        response = chatbot.combine_results(prompt, results, st.session_state.messages)
-                        sources = chatbot.format_sources(results)
-                        response = f"{response}\n\n{sources}"
-                    except Exception:
-                        response = "Sorry, I encountered an error while processing your request. Please try again later."
-            save_assistant_response(response, user_message_id)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            message_placeholder.markdown(response)
+                    flows = chatbot.get_flows(prompt)
+                    if "None" in flows:
+                        response = chatbot.handle_conversation(prompt, st.session_state.messages)
+                    else:
+                        try:
+                            results = await chatbot.execute_flows(prompt, flows)
+                            response = chatbot.combine_results(prompt, results, st.session_state.messages)
+                            sources = chatbot.format_sources(results)
+                            response = f"{response}\n\n{sources}"
+                        except Exception:
+                            response = "Sorry, I encountered an error while processing your request. Please try again later."
+                save_assistant_response(response, user_message_id)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                message_placeholder.markdown(response)
+
+    finally:
+        await chatbot.cleanup()
+        db_pool.close_all()
 
 if __name__ == "__main__":
     asyncio.run(main())

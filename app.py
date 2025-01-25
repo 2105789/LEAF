@@ -28,6 +28,7 @@ from threading import Lock
 import aiohttp
 from functools import lru_cache
 import time
+import threading
 
 nest_asyncio.apply()
 
@@ -640,6 +641,44 @@ class MultiRAGChatbot:
             for result in results["tavily"].get("results", []):
                 sources.append(f"- [{result['title']}]({result['url']})")
         return "\n\n**Sources:**\n" + "\n".join(sources) if sources else ""
+
+def process_agent_response(agent, prompt, response_queue):
+    try:
+        response = agent.get_response(prompt)
+        response_queue.put((agent.name, response))
+    except Exception as e:
+        print(f"Error processing response for {agent.name}: {str(e)}")
+        response_queue.put((agent.name, f"Error: {str(e)}"))
+
+def get_combined_response(prompt, agents):
+    response_queue = Queue()
+    threads = []
+    
+    # Create threads for each agent
+    for agent in agents:
+        thread = threading.Thread(
+            target=process_agent_response,
+            args=(agent, prompt, response_queue)
+        )
+        threads.append(thread)
+        thread.start()
+    
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+    
+    # Collect responses
+    responses = {}
+    while not response_queue.empty():
+        agent_name, response = response_queue.get()
+        responses[agent_name] = response
+    
+    # Format the combined response
+    combined_response = ""
+    for agent_name, response in responses.items():
+        combined_response += f"\n\n{agent_name}'s Response:\n{response}"
+    
+    return combined_response
 
 async def main():
     # Set page configuration

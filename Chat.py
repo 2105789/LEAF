@@ -746,48 +746,10 @@ class MultiRAGChatbot:
                 sources.append(f"- [{result['title']}]({result['url']})")
         return "\n\n**Sources:**\n" + "\n".join(sources) if sources else ""
 
-def process_agent_response(agent, prompt, response_queue):
-    try:
-        response = agent.get_response(prompt)
-        response_queue.put((agent.name, response))
-    except Exception as e:
-        print(f"Error processing response for {agent.name}: {str(e)}")
-        response_queue.put((agent.name, f"Error: {str(e)}"))
-
-def get_combined_response(prompt, agents):
-    response_queue = Queue()
-    threads = []
-    
-    # Create threads for each agent
-    for agent in agents:
-        thread = threading.Thread(
-            target=process_agent_response,
-            args=(agent, prompt, response_queue)
-        )
-        threads.append(thread)
-        thread.start()
-    
-    # Wait for all threads to complete
-    for thread in threads:
-        thread.join()
-    
-    # Collect responses
-    responses = {}
-    while not response_queue.empty():
-        agent_name, response = response_queue.get()
-        responses[agent_name] = response
-    
-    # Format the combined response
-    combined_response = ""
-    for agent_name, response in responses.items():
-        combined_response += f"\n\n{agent_name}'s Response:\n{response}"
-    
-    return combined_response
-
 async def main():
     # Set page configuration
     st.set_page_config(
-        page_title="LEAF Chatbot",
+        page_title="LEaF Chatbot",
         page_icon="🌿",
         initial_sidebar_state="collapsed",
     )
@@ -818,13 +780,21 @@ async def main():
         user_id = str(hash(frozenset(query_params.items())))
         st.session_state.user_id = user_id
 
-        st.title("🌿 LEAF Chatbot")
-        st.markdown("Welcome to the LEAF Chatbot! Ask me anything about climate change, sustainability, and more.")
+        # Add navigation in sidebar
+        with st.sidebar:
+            st.title("Navigation")
+            st.page_link("pages/History.py", label="Chat History", icon="📊")
 
+        # Main chat interface
+        st.title("🌿 LEaF Chatbot")
+        st.markdown("Welcome to the LEaF Chatbot! Ask me anything about climate change, sustainability, and more.")
+
+        # Display chat history
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
+        # Chat input and processing
         if prompt := st.chat_input("What would you like to know?"):
             try:
                 user_message_lower = prompt.lower()

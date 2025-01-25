@@ -268,7 +268,7 @@ class MultiRAGChatbot:
                             raise Exception("All Gemini API keys exhausted")
                         continue
                     return ChatGoogleGenerativeAI(
-                        model="gemini-1.0-pro",
+                        model="gemini-2.0-flash-exp",
                         google_api_key=key,
                         temperature=0.7,
                         top_p=0.95,
@@ -459,6 +459,8 @@ class MultiRAGChatbot:
                     "include_answer": True,
                     "include_raw_content": True,
                     "search_depth": "advanced",
+                    "include_images": True,
+                    "include_image_descriptions": True,
                     "include_domains": [
                         "apctt.org", "arxiv.org", "springer.com", "nature.com",
                         "sciencemag.org", "ipcc.ch", "unfccc.int", "globalchange.gov",
@@ -467,7 +469,7 @@ class MultiRAGChatbot:
                         "irena.org", "pnas.org", "journals.ametsoc.org",
                         "sciencedirect.com", "tandfonline.com", "agu.org"
                     ],
-                    "max_results": 15
+                    "max_results": 5
                 }
                 
                 result = await asyncio.get_event_loop().run_in_executor(
@@ -547,7 +549,109 @@ class MultiRAGChatbot:
                 results, 
                 conversation_history
             )
-            return response
+            
+            # Process response to fix markdown formatting issues
+            processed_response = response
+            
+            # Fix section headers - ensure proper markdown headers
+            processed_response = re.sub(
+                r'\*\*([^*\n]+)\*\*\s*(?:\n|$)', 
+                r'## \1\n', 
+                processed_response
+            )
+            
+            # Fix nested headers
+            processed_response = re.sub(
+                r'\*\*([^*\n]+)\*\*:', 
+                r'### \1:', 
+                processed_response
+            )
+            
+            # Fix bullet points and lists
+            processed_response = re.sub(
+                r'(?m)^\s{4}(\d+\.\s+)?(.+)$', 
+                r'- \2', 
+                processed_response
+            )
+            
+            # Fix links - convert *text* http://url format to [text](url)
+            processed_response = re.sub(
+                r'\*((?:[^*]|\*\*)+)\*\s*(https?://[^\s]+)', 
+                r'[\1](\2)', 
+                processed_response
+            )
+            
+            # Fix tables - ensure proper markdown table formatting
+            def format_table(match):
+                rows = match.group(0).split('\n')
+                # Clean up row content and ensure proper cell spacing
+                formatted_rows = []
+                for i, row in enumerate(rows):
+                    if not row.strip():
+                        continue
+                    cells = [cell.strip() for cell in row.split('\t')]
+                    formatted_row = f"| {' | '.join(cells)} |"
+                    formatted_rows.append(formatted_row)
+                    # Add header separator after first row
+                    if i == 0:
+                        separator = f"|{'|'.join(['---' for _ in cells])}|"
+                        formatted_rows.append(separator)
+                return '\n'.join(formatted_rows)
+            
+            # Find and format tables
+            table_pattern = r'(?:(?:[^\n]+\t[^\n]+(?:\t[^\n]+)*\n?)+)'
+            processed_response = re.sub(table_pattern, format_table, processed_response)
+            
+            # Fix emphasis - ensure consistent bold and italic formatting
+            processed_response = re.sub(r'\*\*\*([^*]+)\*\*\*', r'***\1***', processed_response)  # Bold italic
+            processed_response = re.sub(r'\*\*([^*]+)\*\*', r'**\1**', processed_response)  # Bold
+            processed_response = re.sub(r'(?<!\*)\*(?!\*)([^*]+)\*(?!\*)', r'*\1*', processed_response)  # Italic
+            
+            # Fix image references
+            def format_image(match):
+                desc = match.group(3).strip()
+                return f"\n\n![{desc}]"
+            
+            processed_response = re.sub(
+                r'(The|A) (graphic|image|visual|figure) (shows|illustrates|highlights|displays|depicts)([^.]+)\.?',
+                format_image,
+                processed_response
+            )
+            
+            # Add images from Tavily results
+            if results.get("tavily") and results["tavily"].get("images"):
+                images = results["tavily"]["images"]
+                if images:
+                    processed_response += "\n\n## Related Images\n"
+                    for img in images[:5]:  # Limit to 5 images
+                        if isinstance(img, dict):
+                            description = img.get('description', 'Climate visualization')
+                            url = img['url']
+                            processed_response += f"\n![{description}]({url})\n"
+                            if img.get('description'):
+                                processed_response += f"*{description}*\n"
+                        else:
+                            processed_response += f"\n![Climate visualization]({img})\n"
+            
+            # Fix source list formatting
+            processed_response = re.sub(
+                r'(\d+)\.\s+([^:\n]+):\s*\*([^*]+)\*\s*(https?://[^\s\n]+)',
+                r'\1. [\2: \3](\4)',
+                processed_response
+            )
+            
+            # Ensure proper spacing between sections
+            processed_response = re.sub(r'\n{3,}', '\n\n', processed_response)
+            
+            # Remove any HTML tags
+            processed_response = re.sub(r'<[^>]+>', '', processed_response)
+            
+            # Fix any escaped markdown characters
+            processed_response = processed_response.replace(r'\[', '[').replace(r'\]', ']')
+            processed_response = processed_response.replace(r'\(', '(').replace(r'\)', ')')
+            
+            return processed_response
+            
         except Exception as e:
             logger.error(f"Both LLMs failed: {str(e)}")
             return "I apologize, but I'm having technical difficulties. Please try again in a moment."
@@ -686,7 +790,6 @@ async def main():
         page_title="LEAF Chatbot",
         page_icon="🌿",
         initial_sidebar_state="collapsed",
-        layout="wide"
     )
 
     # Custom CSS for better styling

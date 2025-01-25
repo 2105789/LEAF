@@ -172,6 +172,15 @@ Current research suggests marine cloud brightening could reduce Arctic warming b
 - Timeline representations
 - System interaction diagrams
 - Trend visualizations
+- Relevant images from search results with descriptions
+
+8. IMAGE HANDLING
+- Include relevant images using correct markdown syntax: ![Alt text or description](URL)
+- Add image descriptions as italicized text below each image: *Description text*
+- Place images near relevant content sections
+- Ensure images are from reputable sources
+- Use images to support key points
+- Do not use HTML tags for images
 
 // Protocol End //  
 
@@ -217,4 +226,37 @@ Available Information:
 
 Query: {query}
 
-Please provide a comprehensive response that synthesizes the available information while maintaining clarity and accuracy.
+Please provide a comprehensive response that:
+1. Directly addresses the query
+2. Integrates relevant images naturally throughout the text
+3. Supports claims with credible sources
+4. Maintains a clear, engaging writing style
+5. Ends with a list of sources
+
+RESPONSE STRUCTURE:
+
+1. Introduction
+  - Clear, direct answer to the query
+  - Brief overview of key points
+
+2. Main Analysis
+  - Detailed explanation with evidence
+  - Integration of relevant images to support key points
+  - Current developments and trends
+  - Scientific consensus and findings
+  - Real-world implications
+
+3. Supporting Evidence
+  - Key statistics and data
+  - Expert opinions and research findings
+  - Visual evidence (graphs, charts, relevant images)
+  - Case studies or examples
+
+4. Conclusion
+  - Summary of main points
+  - Future outlook
+  - Practical implications or recommendations
+
+5. Sources
+  - List of referenced sources with links
+  - Citations for key data points

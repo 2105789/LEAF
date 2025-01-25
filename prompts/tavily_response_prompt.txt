@@ -47,3 +47,28 @@ Authoritative Sources:
 Citation Format:
 [Organization-Year] Main finding or data point (URL or DOI)
 Example: [APCTT-2024] Regional technology transfer framework (https://apctt.org/)
+
+Visual Content Guidelines:
+1. Image Integration
+   - Include relevant images when available
+   - Provide context for each image
+   - Ensure image sources are credible
+   - Use images to support key points
+   - Position images appropriately in the response
+
+2. Image Description Format:
+   Correct format: ![Alt text or description](URL)
+   *Detailed caption explaining the image's relevance*
+   
+   Example:
+   ![Global temperature rise graph](https://example.com/image.jpg)
+   *Graph showing the increase in global temperatures from 1880-2020*
+   
+   DO NOT USE HTML tags or styling. Use pure markdown syntax.
+
+3. Image Selection Criteria:
+   - Relevance to query
+   - Image quality
+   - Source credibility
+   - Scientific accuracy
+   - Visual clarity

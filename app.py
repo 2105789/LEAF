@@ -34,10 +34,10 @@ nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize API keys from Streamlit secrets
+# Initialize API keys from Streamlit secrets with backups
 api_keys = {
-    "GROQ_API_KEY": st.secrets["GROQ_API_KEY"],
-    "GOOGLE_API_KEY": st.secrets["GOOGLE_API_KEY"],
+    "GROQ_API_KEY": [st.secrets["GROQ_API_KEY"], st.secrets.get("GROQ_API_KEY_BACKUP", "")],
+    "GEMINI_API_KEY": [st.secrets["GOOGLE_API_KEY"], st.secrets.get("GOOGLE_API_KEY_BACKUP", "")],
     "TAVILY_API_KEY": st.secrets["TAVILY_API_KEY"],
     "QDRANT_URL": st.secrets["QDRANT_URL"],
     "QDRANT_API_KEY": st.secrets["QDRANT_API_KEY"]
@@ -150,6 +150,19 @@ initialize_chat_history_db()
 
 class MultiRAGChatbot:
     def __init__(self, model_config: Optional[Dict] = None):
+        # Initialize state tracking variables first
+        self.current_groq_key_index = 0
+        self.current_gemini_key_index = 0
+        self.key_switch_lock = Lock()
+        
+        # Initialize caches and other attributes
+        self.embedding_cache = TTLCache(maxsize=1000, ttl=3600)  # 1 hour TTL
+        self.search_cache = TTLCache(maxsize=100, ttl=300)  # 5 minutes TTL
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.session = None
+        self.request_semaphore = asyncio.Semaphore(5)
+        
+        # Setup core components
         self.api_keys = api_keys
         self.setup_apis()
         self.setup_llms(model_config)
@@ -157,50 +170,186 @@ class MultiRAGChatbot:
         self.load_prompts()
         self.initialize_response_cache()
         
-        # Add caches
-        self.embedding_cache = TTLCache(maxsize=1000, ttl=3600)  # 1 hour TTL
-        self.search_cache = TTLCache(maxsize=100, ttl=300)  # 5 minutes TTL
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self.session = None
-        self.request_semaphore = asyncio.Semaphore(5)  # Limit concurrent API requests
+        # Add rate limit tracking
+        self.rate_limit_tracking = {
+            "groq": {"last_error": None, "consecutive_errors": 0},
+            "gemini": {"last_error": None, "consecutive_errors": 0}
+        }
 
     def setup_apis(self):
-        for key, value in self.api_keys.items():
-            os.environ[key] = value
-        genai.configure(api_key=self.api_keys["GOOGLE_API_KEY"])
-        self.tavily_client = TavilyClient(self.api_keys["TAVILY_API_KEY"])
+        """Setup API configurations"""
+        try:
+            # Handle list-type API keys
+            for key, value in self.api_keys.items():
+                if isinstance(value, list):
+                    os.environ[key] = value[0] if value and value[0] else ""
+                else:
+                    os.environ[key] = value
+            
+            if self.api_keys["GEMINI_API_KEY"][0]:
+                genai.configure(api_key=self.api_keys["GEMINI_API_KEY"][0])
+            
+            if self.api_keys["TAVILY_API_KEY"]:
+                self.tavily_client = TavilyClient(self.api_keys["TAVILY_API_KEY"])
+            else:
+                logger.warning("Tavily API key not found")
+                
+        except Exception as e:
+            logger.error(f"Error in setup_apis: {str(e)}")
+            raise
+
+    def get_next_api_key(self, service: str) -> str:
+        """Rotate to next available API key for the specified service"""
+        with self.key_switch_lock:
+            if service == "groq":
+                self.current_groq_key_index = (self.current_groq_key_index + 1) % len(self.api_keys["GROQ_API_KEY"])
+                return self.api_keys["GROQ_API_KEY"][self.current_groq_key_index]
+            elif service == "gemini":
+                self.current_gemini_key_index = (self.current_gemini_key_index + 1) % len(self.api_keys["GEMINI_API_KEY"])
+                return self.api_keys["GEMINI_API_KEY"][self.current_gemini_key_index]
+
+    def handle_rate_limit(self, service: str) -> bool:
+        """
+        Handle rate limit errors and rotate API keys
+        Returns True if successfully rotated to new key, False if all keys exhausted
+        """
+        tracking = self.rate_limit_tracking[service]
+        tracking["consecutive_errors"] += 1
+        tracking["last_error"] = time.time()
+        
+        # Try switching to backup key
+        if service == "groq":
+            available_keys = [k for k in self.api_keys["GROQ_API_KEY"] if k]
+            if self.current_groq_key_index + 1 < len(available_keys):
+                self.current_groq_key_index += 1
+                os.environ["GROQ_API_KEY"] = available_keys[self.current_groq_key_index]
+                return True
+        elif service == "gemini":
+            available_keys = [k for k in self.api_keys["GEMINI_API_KEY"] if k]
+            if self.current_gemini_key_index + 1 < len(available_keys):
+                self.current_gemini_key_index += 1
+                key = available_keys[self.current_gemini_key_index]
+                os.environ["GEMINI_API_KEY"] = key
+                genai.configure(api_key=key)
+                return True
+        return False
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    def setup_llm_with_retry(self, service: str):
+        """Setup LLM with enhanced retry logic and key rotation"""
+        max_retries = len([k for k in self.api_keys[f"{'GEMINI' if service == 'gemini' else service.upper()}_API_KEY"] if k])
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                if service == "groq":
+                    key = self.api_keys["GROQ_API_KEY"][self.current_groq_key_index]
+                    if not key:
+                        if not self.handle_rate_limit("groq"):
+                            raise Exception("All Groq API keys exhausted")
+                        continue
+                    return ChatGroq(
+                        model_name="mixtral-8x7b-32768",
+                        groq_api_key=key,
+                        temperature=0.7,
+                        max_tokens=8192,
+                        timeout=30,
+                        max_retries=2,
+                    )
+                elif service == "gemini":
+                    key = self.api_keys["GEMINI_API_KEY"][self.current_gemini_key_index]
+                    if not key:
+                        if not self.handle_rate_limit("gemini"):
+                            raise Exception("All Gemini API keys exhausted")
+                        continue
+                    return ChatGoogleGenerativeAI(
+                        model="gemini-1.0-pro",
+                        google_api_key=key,
+                        temperature=0.7,
+                        top_p=0.95,
+                        top_k=40,
+                        max_output_tokens=8192,
+                    )
+            except Exception as e:
+                last_error = e
+                logger.error(f"Error setting up {service} LLM (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                
+                # Check for rate limit errors
+                if "429" in str(e) or "Resource" in str(e):
+                    if not self.handle_rate_limit(service):
+                        break  # No more keys available
+                    continue
+                    
+                if attempt < max_retries - 1:
+                    next_key = self.get_next_api_key(service)
+                    if next_key:
+                        logger.info(f"Switching to next {service} API key")
+                        if service == "groq":
+                            os.environ["GROQ_API_KEY"] = next_key
+                        else:
+                            os.environ["GEMINI_API_KEY"] = next_key
+                            genai.configure(api_key=next_key)
+                    
+        raise last_error or Exception(f"Failed to initialize {service} LLM after all attempts")
 
     def setup_llms(self, model_config: Optional[Dict] = None):
-        self.groq_llm = ChatGroq(
-            model_name="mixtral-8x7b-32768",
-            groq_api_key=self.api_keys["GROQ_API_KEY"],
-            temperature=0.7,
-            max_tokens=8192,
-            timeout=None,
-            max_retries=2,
-        )
-        self.gemini_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp",
-            google_api_key=self.api_keys["GOOGLE_API_KEY"],
-            temperature=0.7,
-            top_p=0.95,
-            top_k=40,
-            max_output_tokens=8192,
-        )
+        """Setup LLMs with error handling and fallbacks"""
+        llm_setup_success = False
+        
+        # Try to set up Groq
+        try:
+            self.groq_llm = self.setup_llm_with_retry("groq")
+            llm_setup_success = True
+        except Exception as e:
+            logger.error(f"Failed to setup Groq LLM: {str(e)}")
+            self.groq_llm = None
+
+        # Try to set up Gemini
+        try:
+            self.gemini_llm = self.setup_llm_with_retry("gemini")
+            llm_setup_success = True
+        except Exception as e:
+            logger.error(f"Failed to setup Gemini LLM: {str(e)}")
+            self.gemini_llm = None
+
+        if not llm_setup_success:
+            raise RuntimeError("Failed to initialize any language models")
+
         self.output_parser = StrOutputParser()
 
+    async def handle_llm_error(self, service: str, error: Exception):
+        """Handle LLM errors with retries and fallbacks"""
+        logger.error(f"Error with {service}: {str(error)}")
+        try:
+            if service == "groq":
+                self.groq_llm = self.setup_llm_with_retry("groq")
+            else:
+                self.gemini_llm = self.setup_llm_with_retry("gemini")
+        except Exception as e:
+            logger.error(f"Failed to recover {service} LLM: {str(e)}")
+            return "I apologize, but I'm having trouble processing your request. Please try again in a moment."
+
     def setup_databases(self):
-        self.qdrant_client = QdrantClient(
-            url=self.api_keys["QDRANT_URL"],
-            api_key=self.api_keys["QDRANT_API_KEY"]
-        )
-        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        self.vectorstore = QdrantVectorStore(
-            client=self.qdrant_client,
-            collection_name="my_collection",
-            embedding=self.embeddings
-        )
-        self._ensure_qdrant_collection()
+        """Setup vector database connection"""
+        try:
+            self.qdrant_client = QdrantClient(
+                url=self.api_keys["QDRANT_URL"],
+                api_key=self.api_keys["QDRANT_API_KEY"]
+            )
+            self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+            self.vectorstore = QdrantVectorStore(
+                client=self.qdrant_client,
+                collection_name="my_collection",
+                embedding=self.embeddings
+            )
+            self._ensure_qdrant_collection()
+        except Exception as e:
+            logger.error(f"Error setting up databases: {str(e)}")
+            raise
 
     def _ensure_qdrant_collection(self):
         try:
@@ -385,48 +534,105 @@ class MultiRAGChatbot:
         ai_chain = ai_prompt | self.groq_llm | self.output_parser
         return ai_chain.invoke({"query": query})
 
-    def combine_results(self, query: str, results: Dict, conversation_history: List[Dict[str, str]] = None) -> str:
+    async def combine_results(self, query: str, results: Dict, conversation_history: List[Dict[str, str]] = None) -> str:
         if not results:
             return "No results found from any knowledge source."
         
-        # Format conversation history
-        formatted_history = ""
-        if conversation_history:
-            for msg in conversation_history[-5:]:  # Only use last 5 messages for context
-                formatted_history += f"{msg['role'].title()}: {msg['content']}\n"
-        
-        context = self.prompts["system"] + "\n\n" + self.prompts["combined"]
-        combine_prompt = PromptTemplate(
-            template=context + "\n\nConversation History:\n{history}\n\nCurrent Query: {query}",
-            input_variables=["query", "tavily_results", "qdrant_results", "ai_knowledge_results", "history"]
-        )
-        template_vars = {
-            "query": query,
-            "tavily_results": results.get("tavily", "No results from Tavily."),
-            "qdrant_results": results.get("qdrant", "No results from Qdrant."),
-            "ai_knowledge_results": results.get("ai_knowledge", "No results from AI Knowledge."),
-            "history": formatted_history
-        }
-        refine_chain = combine_prompt | self.gemini_llm | self.output_parser
-        return refine_chain.invoke(template_vars)
+        try:
+            # Try Gemini first
+            response = await self._try_llm_with_fallback(
+                "gemini", 
+                query, 
+                results, 
+                conversation_history
+            )
+            return response
+        except Exception as e:
+            logger.error(f"Both LLMs failed: {str(e)}")
+            return "I apologize, but I'm having technical difficulties. Please try again in a moment."
+
+    async def _try_llm_with_fallback(self, primary_llm: str, query: str, results: Dict, conversation_history: List[Dict[str, str]]) -> str:
+        """Try primary LLM with fallback to secondary"""
+        try:
+            formatted_history = self._format_conversation_history(conversation_history)
+            context = self.prompts["system"] + "\n\n" + self.prompts["combined"]
+            combine_prompt = PromptTemplate(
+                template=context + "\n\nConversation History:\n{history}\n\nCurrent Query: {query}",
+                input_variables=["query", "tavily_results", "qdrant_results", "ai_knowledge_results", "history"]
+            )
+            
+            template_vars = {
+                "query": query,
+                "tavily_results": results.get("tavily", "No results from Tavily."),
+                "qdrant_results": results.get("qdrant", "No results from Qdrant."),
+                "ai_knowledge_results": results.get("ai_knowledge", "No results from AI Knowledge."),
+                "history": formatted_history
+            }
+            
+            llm = self.gemini_llm if primary_llm == "gemini" else self.groq_llm
+            fallback_llm = self.groq_llm if primary_llm == "gemini" else self.gemini_llm
+            
+            try:
+                refine_chain = combine_prompt | llm | self.output_parser
+                return await refine_chain.ainvoke(template_vars)
+            except Exception as e:
+                if "429" in str(e) or "Resource" in str(e):
+                    if self.handle_rate_limit(primary_llm):
+                        # Retry with new key
+                        llm = self.setup_llm_with_retry(primary_llm)
+                        refine_chain = combine_prompt | llm | self.output_parser
+                        return await refine_chain.ainvoke(template_vars)
+                
+                # Try fallback LLM
+                logger.warning(f"Primary LLM failed, trying fallback: {str(e)}")
+                refine_chain = combine_prompt | fallback_llm | self.output_parser
+                return await refine_chain.ainvoke(template_vars)
+                
+        except Exception as e:
+            raise Exception(f"Both LLMs failed: {str(e)}")
+
+    def _format_conversation_history(self, conversation_history: List[Dict[str, str]]) -> str:
+        if not conversation_history:
+            return ""
+        return "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in conversation_history[-5:]])
 
     def handle_conversation(self, query: str, conversation_history: List[Dict[str, str]] = None) -> str:
-        if not self.prompts["conversation"]:
-            return "I'm here to chat! How can I assist you today?"
-        
-        # Format conversation history
-        formatted_history = ""
-        if conversation_history:
-            for msg in conversation_history[-5:]:  # Only use last 5 messages for context
-                formatted_history += f"{msg['role'].title()}: {msg['content']}\n"
-        
-        context = self.prompts["system"] + "\n\n" + self.prompts["conversation"]
-        conversation_prompt = PromptTemplate(
-            template=context + "\n\nConversation History:\n{history}\n\nCurrent Query: {query}",
-            input_variables=["query", "history"]
-        )
-        conversation_chain = conversation_prompt | self.groq_llm | self.output_parser
-        return conversation_chain.invoke({"query": query, "history": formatted_history})
+        try:
+            if not self.prompts["conversation"]:
+                return "I'm here to chat! How can I assist you today?"
+            
+            formatted_history = ""
+            if conversation_history:
+                for msg in conversation_history[-5:]:
+                    formatted_history += f"{msg['role'].title()}: {msg['content']}\n"
+            
+            context = self.prompts["system"] + "\n\n" + self.prompts["conversation"]
+            conversation_prompt = PromptTemplate(
+                template=context + "\n\nConversation History:\n{history}\n\nCurrent Query: {query}",
+                input_variables=["query", "history"]
+            )
+            
+            # Try primary LLM first
+            if self.groq_llm:
+                try:
+                    conversation_chain = conversation_prompt | self.groq_llm | self.output_parser
+                    return conversation_chain.invoke({"query": query, "history": formatted_history})
+                except Exception as e:
+                    logger.warning(f"Primary LLM failed: {str(e)}")
+            
+            # Fallback to secondary LLM
+            if self.gemini_llm:
+                try:
+                    conversation_chain = conversation_prompt | self.gemini_llm | self.output_parser
+                    return conversation_chain.invoke({"query": query, "history": formatted_history})
+                except Exception as e:
+                    logger.error(f"Secondary LLM failed: {str(e)}")
+            
+            return "I apologize, but I'm having technical difficulties. Please try again in a moment."
+                
+        except Exception as e:
+            logger.error(f"Conversation handling error: {str(e)}")
+            return "I apologize, but I'm having technical difficulties. Please try asking your question again."
 
     def format_sources(self, results: Dict) -> str:
         sources = []
@@ -478,32 +684,44 @@ async def main():
                 st.markdown(message["content"])
 
         if prompt := st.chat_input("What would you like to know?"):
-            user_message_lower = prompt.lower()
-            user_message_id = save_user_message(user_message_lower)
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                recent_response = get_recent_response(user_message_lower)
-                if recent_response:
-                    response = recent_response
-                else:
-                    flows = chatbot.get_flows(prompt)
-                    if "None" in flows:
-                        response = chatbot.handle_conversation(prompt, st.session_state.messages)
+            try:
+                user_message_lower = prompt.lower()
+                user_message_id = save_user_message(user_message_lower)
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                with st.chat_message("assistant"):
+                    message_placeholder = st.empty()
+                    recent_response = get_recent_response(user_message_lower)
+                    
+                    if recent_response:
+                        response = recent_response
                     else:
-                        try:
-                            results = await chatbot.execute_flows(prompt, flows)
-                            response = chatbot.combine_results(prompt, results, st.session_state.messages)
-                            sources = chatbot.format_sources(results)
-                            response = f"{response}\n\n{sources}"
-                        except Exception:
-                            response = "Sorry, I encountered an error while processing your request. Please try again later."
-                save_assistant_response(response, user_message_id)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                message_placeholder.markdown(response)
+                        flows = chatbot.get_flows(prompt)
+                        if "None" in flows:
+                            response = chatbot.handle_conversation(prompt, st.session_state.messages)
+                        else:
+                            try:
+                                results = await chatbot.execute_flows(prompt, flows)
+                                response = await chatbot.combine_results(prompt, results, st.session_state.messages)
+                                sources = chatbot.format_sources(results)
+                                response = f"{response}\n\n{sources}"
+                            except Exception as e:
+                                logger.error(f"Error processing request: {str(e)}")
+                                response = "I apologize, but I encountered an error. Please try rephrasing your question or try again later."
+                    
+                    save_assistant_response(response, user_message_id)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    message_placeholder.markdown(response)
+                    
+            except Exception as e:
+                logger.error(f"Error in chat loop: {str(e)}")
+                st.error("An error occurred while processing your message. Please try again.")
 
+    except Exception as e:
+        logger.error(f"Critical error in main: {str(e)}")
+        st.error("The application encountered a critical error. Please refresh the page and try again.")
+        
     finally:
         await chatbot.cleanup()
         db_pool.close_all()

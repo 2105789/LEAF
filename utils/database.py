@@ -4,25 +4,13 @@ from threading import Lock
 import streamlit as st
 
 class DatabaseConnectionPool:
-    _instance = None
-    _lock = Lock()
-    
-    def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(DatabaseConnectionPool, cls).__new__(cls)
-            return cls._instance
-    
-    def __init__(self):
-        if not hasattr(self, 'initialized'):
-            self.max_connections = 5
-            self.connections = Queue(maxsize=self.max_connections)
-            self.lock = Lock()
-            self.initialized = True
-            self._initialize_pool()
-    
-    def _initialize_pool(self):
-        for _ in range(self.max_connections):
+    def __init__(self, max_connections=5):
+        self.max_connections = max_connections
+        self.connections = Queue(maxsize=max_connections)
+        self.lock = Lock()
+        
+        # Initialize the pool
+        for _ in range(max_connections):
             conn = sqlite3.connect("chat_history.db", check_same_thread=False)
             self.connections.put(conn)
     

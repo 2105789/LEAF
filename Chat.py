@@ -1,4 +1,48 @@
 import streamlit as st
+import base64
+
+# Set page configuration
+st.set_page_config(
+    page_title="LEaF Chatbot",
+    page_icon="🌿",
+    initial_sidebar_state="collapsed",
+)
+
+# Custom CSS for better styling
+st.markdown(
+"""
+<style>
+[data-testid="stSidebar"][aria-expanded="true"] > div:first-child{
+    width: 400px;
+}
+[data-testid="stSidebar"][aria-expanded="false"] > div:first-child{
+    width: 400px;
+    margin-left: -400px;
+}
+
+.header-container {
+    display: flex;
+    align-items: center;
+    padding: 1rem 0;
+    margin-bottom: 2rem;
+    background-color: #ffffff;
+    border-bottom: 2px solid #e6e6e6;
+}
+
+.logo-img {
+    max-height: 80px;
+    margin-right: 1rem;
+}
+
+.header-text {
+    color: #1e4620;
+    font-size: 1.5rem;
+    margin: 0;
+    padding: 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
 from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
 from tavily import TavilyClient
@@ -29,6 +73,7 @@ import aiohttp
 from functools import lru_cache
 import time
 import threading
+from PIL import Image
 
 nest_asyncio.apply()
 
@@ -148,6 +193,7 @@ def load_chat_history():
     return [{"role": "user", "content": row[0]} if row[0] else {"role": "assistant", "content": row[1]} for row in rows]
 
 initialize_chat_history_db()
+
 
 class MultiRAGChatbot:
     def __init__(self, model_config: Optional[Dict] = None):
@@ -747,27 +793,6 @@ class MultiRAGChatbot:
         return "\n\n**Sources:**\n" + "\n".join(sources) if sources else ""
 
 async def main():
-    # Set page configuration
-    st.set_page_config(
-        page_title="LEaF Chatbot",
-        page_icon="🌿",
-        initial_sidebar_state="collapsed",
-    )
-
-    # Custom CSS for better styling
-    st.markdown(
-    """
-    <style>
-    [data-testid="stSidebar"][aria-expanded="true"] > div:first-child{
-        width: 400px;
-    }
-    [data-testid="stSidebar"][aria-expanded="false"] > div:first-child{
-        width: 400px;
-        margin-left: -400px;
-    }
-     
-    """,unsafe_allow_html=True,)
-
     chatbot = MultiRAGChatbot()
     
     try:
@@ -785,9 +810,23 @@ async def main():
             st.title("Navigation")
             st.page_link("pages/History.py", label="Chat History", icon="📊")
 
-        # Main chat interface
-        st.title("🌿 LEaF Chatbot")
-        st.markdown("Welcome to the LEaF Chatbot! Ask me anything about climate change, sustainability, and more.")
+        # Create header with logo and title
+        header_html = """
+        <div class="header-container">
+            <img src="data:image/png;base64,{}" class="logo-img">
+            <div class="header-text">
+                Welcome to LEaF Chatbot
+            </div>
+        </div>
+        """
+        
+        # Read and encode the logo image
+        with open("assets/logo_placeholder.png", "rb") as f:
+            logo_bytes = f.read()
+            logo_b64 = base64.b64encode(logo_bytes).decode()
+        
+        st.markdown(header_html.format(logo_b64), unsafe_allow_html=True)
+        st.markdown("Ask me anything about climate change, sustainability, and more.")
 
         # Display chat history
         for message in st.session_state.messages:

@@ -1,0 +1,30 @@
+[theme]
+# Light theme
+primaryColor = "#57886C"         # Muted sage green
+backgroundColor = "#f8faf8"      # Very soft mint white
+secondaryBackgroundColor = "#ffffff"
+textColor = "#2c363f"           # Soft charcoal
+secondaryTextColor = "#4f5b66"  # Muted gray for secondary text
+
+# Typography and spacing
+font = "system-ui"
+
+# Interactive elements
+inputBackgroundColor = "#ffffff"
+inputTextColor = "#2c363f"
+
+# Accent colors - keeping them subtle
+headerColor = "#57886C"          # Same as primary for consistency
+plotBackgroundColor = "#ffffff"  # Clean background for plots
+
+# Dark theme alternative (can be switched to with base="dark")
+[theme.dark]
+primaryColor = "#6b9080"         # Soft forest green
+backgroundColor = "#1f2327"      # Deep but not stark black
+secondaryBackgroundColor = "#2a2f35"
+textColor = "#e1e5ea"           # Off-white for better eye comfort
+secondaryTextColor = "#b0b8c1"
+
+# Interactive elements (dark)
+inputBackgroundColor = "#2a2f35"
+inputTextColor = "#e1e5ea"

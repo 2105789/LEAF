@@ -508,7 +508,7 @@ class MultiRAGChatbot:
                     "include_images": True,
                     "include_image_descriptions": True,
                     "include_domains": [
-                        "apctt.org", "arxiv.org", "springer.com", "nature.com",
+                        "apctt.org","apctt.org/techmonitor/", "arxiv.org", "springer.com", "nature.com",
                         "sciencemag.org", "ipcc.ch", "unfccc.int", "globalchange.gov",
                         "climate.gov", "carbonbrief.org", "wmo.int", 
                         "earthobservatory.nasa.gov", "copernicus.eu", "iea.org",

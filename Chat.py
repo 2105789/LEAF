@@ -447,6 +447,19 @@ class MultiRAGChatbot:
         if self.prompts["system"]:
             self.prompts["system"] = self.prompts["system"].format(current_date=current_date)
 
+        # Add to system prompt or combined prompt
+        image_guidance = """
+        Important: Only reference images or visualizations when they are actually provided in the results. 
+        Do not mention looking at graphics, charts, or figures unless they are specifically included in the response.
+        Focus on explaining concepts clearly through text, and only incorporate available visual elements.
+        """
+        
+        if self.prompts["system"]:
+            self.prompts["system"] += "\n" + image_guidance
+        
+        if self.prompts["combined"]:
+            self.prompts["combined"] += "\n" + image_guidance
+
     def initialize_response_cache(self):
         if "response_cache" not in st.session_state:
             st.session_state.response_cache = {}
@@ -598,8 +611,55 @@ class MultiRAGChatbot:
             
             # Process response to fix markdown formatting issues
             processed_response = response
+
+            # Only add images section if we actually have images
+            has_images = False
+            image_urls = []
+            if results.get("tavily") and results["tavily"].get("images"):
+                images = results["tavily"]["images"]
+                if images:
+                    has_images = True
+                    for img in images[:5]:  # Limit to 5 images
+                        if isinstance(img, dict) and img.get('url'):
+                            image_urls.append({
+                                'url': img['url'],
+                                'description': img.get('description', 'Related visualization')
+                            })
+                        elif isinstance(img, str):
+                            image_urls.append({
+                                'url': img,
+                                'description': 'Related visualization'
+                            })
+
+            # Remove any references to non-existent images/graphics
+            processed_response = re.sub(
+                r'(?i)(As shown in|The|A|This) (graphic|image|visual|figure|chart|infographic|diagram)( below| above)? (shows|illustrates|highlights|displays|depicts|demonstrates)([^.]+)\.?\s*',
+                '',
+                processed_response
+            )
             
-            # Fix section headers - ensure proper markdown headers
+            # Remove phrases about looking at images
+            processed_response = re.sub(
+                r'(?i)(Look at|See|As you can see in|Looking at) (the|this) (graphic|image|visual|figure|chart|infographic|diagram)([^.]+)\.?\s*',
+                '',
+                processed_response
+            )
+
+            # Only add images section if we actually have valid images
+            if has_images and image_urls:
+                processed_response += "\n\n## Related Visualizations\n"
+                for img in image_urls:
+                    # Verify URL is valid before adding
+                    try:
+                        async with self.session.head(img['url'], timeout=5) as response:
+                            if response.status == 200:
+                                processed_response += f"\n![{img['description']}]({img['url']})\n"
+                                processed_response += f"*{img['description']}*\n"
+                    except Exception as e:
+                        logger.warning(f"Failed to verify image URL {img['url']}: {str(e)}")
+                        continue
+
+            # Fix section headers and other formatting
             processed_response = re.sub(
                 r'\*\*([^*\n]+)\*\*\s*(?:\n|$)', 
                 r'## \1\n', 
@@ -663,21 +723,6 @@ class MultiRAGChatbot:
                 format_image,
                 processed_response
             )
-            
-            # Add images from Tavily results
-            if results.get("tavily") and results["tavily"].get("images"):
-                images = results["tavily"]["images"]
-                if images:
-                    processed_response += "\n\n## Related Images\n"
-                    for img in images[:5]:  # Limit to 5 images
-                        if isinstance(img, dict):
-                            description = img.get('description', 'Climate visualization')
-                            url = img['url']
-                            processed_response += f"\n![{description}]({url})\n"
-                            if img.get('description'):
-                                processed_response += f"*{description}*\n"
-                        else:
-                            processed_response += f"\n![Climate visualization]({img})\n"
             
             # Fix source list formatting
             processed_response = re.sub(

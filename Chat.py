@@ -388,27 +388,43 @@ class MultiRAGChatbot:
                 api_key=self.api_keys["QDRANT_API_KEY"]
             )
             self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+            
+            # First try to get the collection
+            try:
+                collection_info = self.qdrant_client.get_collection("leaf_data")
+                vector_size = collection_info.config.params.vectors.size
+                
+                # If dimensions don't match, recreate the collection
+                if vector_size != 384:  # all-MiniLM-L6-v2 uses 384 dimensions
+                    logger.info("Recreating collection due to dimension mismatch")
+                    self.qdrant_client.delete_collection("leaf_data")
+                    self.qdrant_client.create_collection(
+                        collection_name="leaf_data",
+                        vectors_config=models.VectorParams(
+                            size=384,
+                            distance=models.Distance.COSINE
+                        )
+                    )
+            except Exception:
+                # Collection doesn't exist, create it
+                logger.info("Creating new Qdrant collection")
+                self.qdrant_client.create_collection(
+                    collection_name="leaf_data",
+                    vectors_config=models.VectorParams(
+                        size=384,
+                        distance=models.Distance.COSINE
+                    )
+                )
+            
+            # Initialize vector store
             self.vectorstore = QdrantVectorStore(
                 client=self.qdrant_client,
                 collection_name="leaf_data",
                 embedding=self.embeddings
             )
-            self._ensure_qdrant_collection()
         except Exception as e:
             logger.error(f"Error setting up databases: {str(e)}")
             raise
-
-    def _ensure_qdrant_collection(self):
-        try:
-            self.qdrant_client.get_collection("leaf_data")
-        except Exception:
-            self.qdrant_client.recreate_collection(
-                collection_name="leaf_data",
-                vectors_config=models.VectorParams(
-                    size=384,
-                    distance=models.Distance.COSINE
-                )
-            )
 
     def load_prompts(self):
         self.prompts = {}

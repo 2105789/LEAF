@@ -390,7 +390,7 @@ class MultiRAGChatbot:
             self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
             self.vectorstore = QdrantVectorStore(
                 client=self.qdrant_client,
-                collection_name="my_collection",
+                collection_name="leaf_data",
                 embedding=self.embeddings
             )
             self._ensure_qdrant_collection()
@@ -400,10 +400,10 @@ class MultiRAGChatbot:
 
     def _ensure_qdrant_collection(self):
         try:
-            self.qdrant_client.get_collection("my_collection")
+            self.qdrant_client.get_collection("leaf_data")
         except Exception:
             self.qdrant_client.recreate_collection(
-                collection_name="my_collection",
+                collection_name="leaf_data",
                 vectors_config=models.VectorParams(
                     size=384,
                     distance=models.Distance.COSINE
